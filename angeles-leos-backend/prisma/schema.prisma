@@ -1,0 +1,177 @@
+// 1. Configuración del Cliente Prisma y Base de Datos (Formato Prisma 7)
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// 2. Definición de Roles del Sistema (Para los Guards de NestJS y menús en React)
+enum Role {
+  ADMIN
+  MEDICO
+  RECEPCION
+  PACIENTE
+}
+
+enum EstadoCita {
+  PENDIENTE
+  CONFIRMADA
+  COMPLETADA
+  CANCELADA
+}
+
+enum TipoTransaccion {
+  INGRESO // Consultas, medicamentos, etc.
+  EGRESO  // Gastos de la clínica, insumos
+}
+
+// 3. Tabla General de Usuarios (Credenciales, Perfil y Seguridad)
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  password        String    // Almacenará el hash (mínimo 8 caracteres, etc. validados en NestJS)
+  nombre          String
+  apellido        String
+  role            Role      @default(PACIENTE)
+  telefono        String?
+  activo          Boolean   @default(true)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  // Relaciones específicas según el Rol
+  medicoPerfil    Medico?   @relation("UserToMedico")
+  pacientePerfil  Paciente? @relation("UserToPaciente")
+}
+
+// 4. Perfil de Médicos (Información clínica y profesional)
+model Medico {
+  id                String         @id @default(uuid())
+  userId            String         @unique
+  user              User           @relation("UserToMedico", fields: [userId], references: [id], onDelete: Cascade)
+  cedulaProfesional String         @unique
+  especialidad      String         @default("Medicina General")
+  
+  // Relaciones relativas a la clínica
+  citas             Appointment[]
+  expedientes       MedicalRecord[]
+  recetas           Prescription[]
+
+  createdAt         DateTime       @default(now())
+  updatedAt         DateTime       @updatedAt
+}
+
+// 5. Perfil de Pacientes (Información personal e identificador único)
+model Paciente {
+  id              String         @id @default(uuid())
+  
+  // Relación con Usuario (Una relación 1:1 apuntando de vuelta a User)
+  userId          String?        @unique
+  user            User?          @relation("UserToPaciente", fields: [userId], references: [id], onDelete: SetNull)
+  
+  // Datos requeridos en el registro de pacientes
+  nombreCompleto  String         // Para búsquedas rápidas ("Elena Rodríguez")
+  edad            Int
+  fechaNacimiento DateTime
+  genero          String
+  tipoSanguineo   String?
+
+  // Relaciones con los otros módulos existentes
+  citas             Appointment[]
+  expedienteClinico MedicalRecord?   @relation("PacienteToExpediente")
+  finanzas          Finance[]
+
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+}
+
+// 6. Agenda y Control de Citas 
+model Appointment {
+  id            String      @id @default(uuid())
+  fechaHora     DateTime    // Día y hora de la sesión
+  motivo        String?     // Notas breves del porqué asiste
+  estado        EstadoCita  @default(PENDIENTE)
+
+  // Relaciones obligatorias
+  pacienteId    String
+  paciente      Paciente    @relation(fields: [pacienteId], references: [id], onDelete: Cascade)
+  
+  medicoId      String
+  medico        Medico      @relation(fields: [medicoId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+}
+
+// 7. Expediente Clínico (Historial e Información Médica Confidencial)
+model MedicalRecord {
+  id                  String     @id @default(uuid())
+  // Código personalizado visible en tu UI, ej: "EXP-2024-001"
+  codigoExpediente    String     @unique 
+  
+  // Relaciones principales
+  pacienteId          String     @unique
+  paciente            Paciente   @relation("PacienteToExpediente", fields: [pacienteId], references: [id], onDelete: Cascade)
+  
+  medicoResponsableId String
+  medicoResponsable   Medico     @relation(fields: [medicoResponsableId], references: [id])
+
+  // Datos Clínicos de la última visita/diagnóstico principal
+  diagnosticoPrincipal String     // Ej: "Hipertensión arterial primaria"
+  tratamiento         String     // Detalle de la receta (para el generador de PDF)
+  notasMedicas        String?    @db.Text
+  
+  // Archivos adjuntos (Urls de Supabase Storage: Radiografías, Análisis)
+  archivosAdjuntos    String[]   @default([]) 
+
+  // Recetas médicas ligadas a este expediente
+  recetas             Prescription[]
+
+  ultimaVisita        DateTime   @default(now())
+  createdAt           DateTime   @default(now())
+  updatedAt           DateTime   @updatedAt
+}
+
+// 8. Módulo de Finanzas y Facturación (Ingresos y Egresos)
+model Finance {
+  id            String          @id @default(uuid())
+  tipo          TipoTransaccion @default(INGRESO)
+  concepto      String          // Ej: "Consulta médica", "Recibo de Pago", "Insumos"
+  monto         Decimal         @db.Decimal(10, 2)
+  fecha         DateTime        @default(now())
+  
+  // Relación opcional (si es un pago/ingreso hecho por un Paciente)
+  pacienteId    String?
+  paciente      Paciente?       @relation(fields: [pacienteId], references: [id], onDelete: SetNull)
+
+  createdAt     DateTime        @default(now())
+}
+
+// 9. Módulo de Recetas Médicas (Prescriptions)
+// Complemento del Expediente Clínico: medicamentos, dosis, frecuencia y firma del médico.
+model Prescription {
+  id                  String        @id @default(uuid())
+  // Código visible en el PDF de la receta, ej: "RX-2026-001"
+  codigoReceta        String        @unique
+
+  // Relación con el expediente clínico al que pertenece
+  medicalRecordId     String
+  medicalRecord       MedicalRecord @relation(fields: [medicalRecordId], references: [id], onDelete: Cascade)
+
+  // Médico que emite y firma la receta
+  medicoId            String
+  medico              Medico        @relation(fields: [medicoId], references: [id])
+
+  // Lista de medicamentos: [{ nombre, dosis, frecuencia, duracion }]
+  medicamentos        Json
+
+  indicacionesGenerales String?     @db.Text
+
+  // Firma digital del médico (hash o url, se conectará con Supabase Storage)
+  firmaMedico         String?
+  fechaEmision         DateTime     @default(now())
+
+  createdAt           DateTime     @default(now())
+  updatedAt            DateTime    @updatedAt
+}
